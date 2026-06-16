@@ -261,6 +261,18 @@ Edit the `.bicepparam` files (Section 8), commit, and push. The push triggers CI
 edit .bicepparam → branch → push → PR (CI: build + what-if) → review/approve → merge to main → CD (Apply gate → deploy)
 ```
 
+### 7.1a Deploy entry point — what you actually "run"
+
+There is **no single root `main.bicep`** that deploys the whole landing zone. Each module is deployed **independently at its own scope**, orchestrated by the pipeline. So "which file do I run" depends on the stage:
+
+| Goal | What you run | Notes |
+|---|---|---|
+| **Bootstrap the environment** (once per platform) | `Deploy-Accelerator` (PowerShell cmdlet from the `ALZ` module) | Not a file in the repo — it reads `./config/inputs.yaml` + `./config/platform-landing-zone.yaml`. See §6.1. |
+| **Deploy / update the landing zone** (normal path) | **Merge to `main`** → the **CD pipeline** runs automatically | You don't invoke Bicep by hand. The CD pipeline (YAML in the generated *pipeline-templates* repo) deploys each module's `main.bicep` in order. This is the day-to-day "execute" action. |
+| **Manual / local deploy or dry-run** | `az deployment mg create` / `az deployment sub create` **per module** | Use for testing or Approach B. One command per `main.bicep` + `main.bicepparam`, in the order in §7.2. Commands in §7.5. |
+
+> Day-to-day, **"deploy" = open a PR and merge it.** The pipeline is the execution engine; the `main.bicep` files are what it runs.
+
 ### 7.2 Deploy order
 
 The accelerator's CD pipeline deploys management-group templates independently, each referencing its parent MG id. Effective order:
@@ -338,7 +350,32 @@ az deployment sub create \
 
 ## 8. Configuration — mapping the TRG design to the Bicep parameters
 
-After bootstrap, edit these in the **module repo**. Each module folder has its own `main.bicep` + `main.bicepparam`.
+After bootstrap, edit these in the **module repo**. Each module folder has its own `main.bicep` (the template — you normally **don't** edit) + `main.bicepparam` (the parameters — **this is what you edit**).
+
+### 8.0 File map — exactly which files to edit
+
+**A) Config files (set these *before* bootstrap; tokens flow into the `.bicepparam` files).** Located at `./config/` in your working/target directory.
+
+| File | Edit | Key settings for the TRG design |
+|---|---|---|
+| `config/inputs.yaml` | Bootstrap inputs | IaC=`bicep`, VCS=`azuredevops`, ADO org/project, `token-1`, the four **subscription IDs** (Management, Connectivity, Identity, Application), parent MG, module/bootstrap **versions** (pin them). |
+| `config/platform-landing-zone.yaml` | Platform LZ config | `starter_locations` (regions); MG ids/names → set `management_group_int_root_id/name` to **`TRG`** (replaces default `alz`/"Azure Landing Zones"), keep `platform`, `connectivity`, `identity`, `landingzones` ("Landing Zone"), optionally trim `sandbox`/`decommissioned`; `network_type: hubNetworking`; RG name prefixes (`rg-alz-conn`, `rg-alz-logging`, `rg-alz-dns`). |
+
+**B) Template parameter files (edit *after* bootstrap to customise; bootstrap pre-fills subscription IDs/regions from the YAML).** Under `templates/`.
+
+| File | Edit | What to change |
+|---|---|---|
+| `templates/core/governance/mgmt-groups/int-root/main.bicepparam` | **TRG root MG** | In `intRootConfig`: `managementGroupName` / `managementGroupDisplayName` = TRG; `managementGroupParentId` = your **Tenant Root Group GUID**. In `parPolicyAssignmentParameterOverrides`: set the real `emailSecurityContact` and service-health `actionGroupEmail`. Set `parLocations`. |
+| `templates/core/governance/mgmt-groups/platform/main.bicepparam` | **Platform MG** | `platformConfig.managementGroupParentId` = `TRG`. Place **Connectivity, Identity, Management** subscriptions via `subscriptionsToPlaceInManagementGroup` (or the connectivity/identity child config). |
+| `templates/core/governance/mgmt-groups/landingzones/main.bicepparam` | **Landing Zone MG** | Parent = `TRG`. Place the **Application** subscription via `subscriptionsToPlaceInManagementGroup`. |
+| `templates/core/governance/mgmt-groups/sandbox/main.bicepparam` | Optional | Keep or remove (also remove from the deploy order if removed). |
+| `templates/core/governance/mgmt-groups/decommissioned/main.bicepparam` | Optional | Keep (recommended for guardrails). |
+| `templates/core/logging/main.bicepparam` | **Logging** | `parLocations`; retention; enable/disable Sentinel, Change Tracking, Automation. Deploys into the **Management** subscription. |
+| `templates/networking/hubnetworking/main.bicepparam` | **Hub** | `hubNetworks` array → hub VNet name, `addressPrefixes` (e.g. `10.0.0.0/16`), Azure Firewall, VPN/ExpressRoute gateways, Bastion, Private DNS; `parLocations`; `deployPeering`/`peeringSettings`. Deploys into the **Connectivity** subscription. |
+
+> The `mgmt-groups` folder ships five MG folders by default: `int-root` (=TRG), `platform`, `landingzones`, `sandbox`, `decommissioned`. The `connectivity` / `identity` / `security` child MGs and `corp` / `online` are created from the YAML config inside the `platform` / `landingzones` templates. Each MG `main.bicepparam` references its **parent MG id**, so confirm Platform and Landing Zone both point at `TRG`.
+
+> Spoke VNets (Identity, App A, App B, Citrix) are **not** in these files — they're deployed separately per §9.
 
 ### 8.1 Management group hierarchy (`Core/Governance/mgmt-groups`)
 
